@@ -77,6 +77,37 @@ tenant managers belonging to this project.
 
 @task
 @verbose
+def allocation_managers(csv=False, filename=None):
+    """Get the allocation manager emails for all projects.
+    """
+    keystone = hm_keystone.client_session(version=3)
+    all_users = map(lambda x: x.to_dict(), keystone.users.list())
+    email_dict = {x['id']: x['email'] for x in all_users
+                  if 'email' in x and x['email'] is not None}
+    projects = keystone.projects.list()
+    managers = collections.defaultdict(list)
+    for user_role in keystone.role_assignments.list(role=14):
+        if 'project' in user_role.scope:
+            managers[user_role.scope['project']['id']].append(
+                user_role.user['id'])
+    headings = ["Tenant ID", "Manager email(s)"]
+    records = []
+    for proj in projects:
+        if len(managers[proj.id]) == 0:
+            continue
+        emails = set()
+        for tm in managers[proj.id]:
+            if tm in email_dict:
+                emails.add(email_dict[tm])
+        records.append([proj.id, ",".join(emails)])
+    if csv:
+        csv_output(headings, records, filename=filename)
+    else:
+        pretty_output(headings, records, filename=filename)
+
+
+@task
+@verbose
 def get_instance_usage_csv(start_date=None, end_date=None, filename=None):
     """Get instance usage statistics for all projects.
 Date strings should be ISO 8601 to minute precision
@@ -142,13 +173,13 @@ def get_general_allocations_information(filename=None):
     allocations = api_endpoint.get_allocations()
     fields_to_report = [
         ("Tenant ID", lambda x: x['tenant_uuid']),
-        ("Tenant Name",
-            lambda x: x['project_name'] if x['tenant_name'] is None
-            else x['tenant_name']),
+        ("Tenant Name", lambda x: x['tenant_name']),
+        ("Project Name", lambda x: x['project_name']),
         ("Allocation Home",
             lambda x: x['allocation_home'] if 'allocation_home' in x
             and x['allocation_home'] is not None else ""),
         ("Status", lambda x: x['status']),
+        ("Modified time", lambda x: x['modified_time']),
         ("Instances", lambda x: x['instance_quota']),
         ("vCPU quota", lambda x: x['core_quota']),
         ("RAM quota", lambda x: x['ram_quota']),
