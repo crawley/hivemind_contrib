@@ -31,6 +31,29 @@ def _get_current_allocations():
     return tenant_allocations
 
 
+def _get_flavor_map(nova_api):
+    flavors = {}
+    for flavor in nova_api.flavors.list(is_public=True):
+        flavors[flavor.id] = flavor
+    for flavor in nova_api.flavors.list(is_public=False):
+        flavors[flavor.id] = flavor
+    return flavors
+
+
+def _get_usage(nova_api, flavors, uuid):
+    instances = nova_api.servers.list(search_opts={'project_id': uuid,
+                                                   'tenant_id': uuid,
+                                                   'all_tenants': 1})
+    if len(instances) == 0:
+        return {'instances': 0, 'ram': 0, 'vcpus': 0}
+    instance_flavors = map(lambda x: flavors[x.flavor['id']], instances);
+    vcpus = 0;
+    ram = 0;
+    for flavor in instance_flavors:
+        vcpus += flavor.vcpus
+        ram += flavor.ram
+    return {'instances': len(instances), 'ram': ram, 'vcpus': vcpus}
+
 @task
 @verbose
 def crosscheck_usage(filename=None):
@@ -40,31 +63,16 @@ def crosscheck_usage(filename=None):
 
     allocations = _get_current_allocations()
     nova_api = hm_nova.client()
-    flavors = {}
-    for flavor in nova_api.flavors.list(is_public=True):
-        flavors[flavor.id] = flavor
-    for flavor in nova_api.flavors.list(is_public=False):
-        flavors[flavor.id] = flavor
+    flavors = _get_flavor_map(nova_api)
     missing = []
     mismatches = []
     for uuid in allocations.keys():
         alloc = allocations[uuid]
-        instances = nova_api.servers.list(search_opts={'project_id': uuid,
-                                                       'tenant_id': uuid,
-                                                       'all_tenants': 1})
-        if len(instances) == 0:
-            continue
-        instance_flavors = map(lambda x: flavors[x.flavor['id']], instances);
-        vcpus = 0;
-        ram = 0;
-        for flavor in instance_flavors:
-            vcpus += flavor.vcpus
-            ram += flavor.ram
-        if (len(instances) > alloc['instance_quota']
-            or vcpus > alloc['core_quota'] 
-            or ram > alloc['ram_quota'] * 1024):
-            alloc['nova_usage'] = {
-                'instances': len(instances), 'ram': ram, 'vcpus': vcpus}
+        usage = _get_usage(nova_api, flavor_map, uuid)
+        if (usage['instances'] > alloc['instance_quota']
+            or usage['vcpus'] > alloc['core_quota'] 
+            or usage['ram'] > alloc['ram_quota'] * 1024):
+            alloc['nova_usage'] = usage
             mismatches.append(alloc)
 
     print '{0} allocations, {1} missing tenants, {2} usage mismatches'.format(
@@ -133,7 +141,6 @@ def crosscheck_quotas(filename=None):
                filename=filename)
 
 
-
 @task
 @verbose
 def compare_quotas(name_or_id=None):
@@ -154,6 +161,9 @@ def compare_quotas(name_or_id=None):
     quotas = nova_api.quotas.get(tenant.id)
     print 'nova quotas: instances {0}, cores {1}, ram {2}'.format(
         quotas.instances, quotas.cores, quotas.ram / 1024)
+    usage = _get_usage(nova_api, _get_flavor_map(nova_api), tenant.id)
+    print 'nova isage: instances {0}, cores {1}, ram {2}'.format(
+        usage['instances'], usage['vcpus'], usage['ram'] / 1024)
 
     allocations_api = NectarApiSession()
     allocations = allocations_api.get_allocations(); 
@@ -168,13 +178,20 @@ def compare_quotas(name_or_id=None):
     tenant_allocations.sort(key=lambda alloc: alloc['modified_time'])
     current_allocation = tenant_allocations[-1]
     
+    format = '{0} mismatch: allocated {1}, nova {2}, used {3}'
     if current_allocation['instance_quota'] != quotas.instances:
-        print 'Instance quota mismatch: allocated = {0}, nova = {1}'.format(
-            current_allocation['instance_quota'], quotas.instances)
+        print format.format('Instance quota',
+                            current_allocation['instance_quota'], 
+                            quotas.instances,
+                            usage['instances'])
     if current_allocation['core_quota'] != quotas.cores:
-        print 'Core quota mismatch: allocated = {0}, nova = {1}'.format(
-            current_allocation['core_quota'], quotas.cores)
+        print format.format('VCPU quota',
+                            current_allocation['core_quota'], 
+                            quotas.cores,
+                            usage['vcpus'])
     if current_allocation['ram_quota'] * 1024 != quotas.ram:
-        print 'RAM quota mismatch: allocated = {0}MB, nova = {1}MB'.format(
-            current_allocation['ram_quota'] * 1024, quotas.ram)
+        print format.format('RAM quota',
+                            current_allocation['ram_quota'] * 1024, 
+                            quotas.ram,
+                            usage['ram'])
 
