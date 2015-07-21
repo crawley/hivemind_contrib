@@ -68,7 +68,7 @@ def crosscheck_usage(filename=None):
     mismatches = []
     for uuid in allocations.keys():
         alloc = allocations[uuid]
-        usage = _get_usage(nova_api, flavor_map, uuid)
+        usage = _get_usage(nova_api, flavors, uuid)
         if (usage['instances'] > alloc['instance_quota']
             or usage['vcpus'] > alloc['core_quota'] 
             or usage['ram'] > alloc['ram_quota'] * 1024):
