@@ -4,6 +4,7 @@ import datetime
 import requests
 from fabric.api import task
 import collections
+import csv
 
 import hivemind_contrib.keystone as hm_keystone
 import hivemind_contrib.nova as hm_nova
@@ -162,7 +163,7 @@ def compare_quotas(name_or_id=None):
     print 'nova quotas: instances {0}, cores {1}, ram {2}'.format(
         quotas.instances, quotas.cores, quotas.ram / 1024)
     usage = _get_usage(nova_api, _get_flavor_map(nova_api), tenant.id)
-    print 'nova isage: instances {0}, cores {1}, ram {2}'.format(
+    print 'nova usage: instances {0}, cores {1}, ram {2}'.format(
         usage['instances'], usage['vcpus'], usage['ram'] / 1024)
 
     allocations_api = NectarApiSession()
@@ -195,3 +196,101 @@ def compare_quotas(name_or_id=None):
                             quotas.ram,
                             usage['ram'])
 
+@task
+@verbose
+def quota_reversions(infile=None, id_col=1, cores_col=2, 
+                     instances_col=3, outfile=None):
+    tenants = {};
+    if infile != None:
+        with open(infile, 'rb') as csvfile:
+            for row in csv.reader(csvfile, delimiter=','):
+                try:
+                    tenants[row[id_col]] = [int(row[cores_col]), 
+                                            int(row[instances_col])]
+                except:
+                    continue
+    
+    allocations = _get_current_allocations()
+    nova_api = hm_nova.client()
+    flavors = _get_flavor_map(nova_api)
+    updates = []
+    for uuid in allocations.keys():
+        alloc = allocations[uuid]
+        if len(tenants) > 0:
+            # Figure out what the quota should have been prior to
+            # the adjustment
+            if uuid in tenants:
+                deltas = tenants[uuid]
+                expected = {
+                    'core_quota': alloc['core_quota'] + deltas[0],
+                    'instance_quota': alloc['instance_quota'] + deltas[1],
+                    'ram_quota': (alloc['ram_quota'] + deltas[0] * 4) * 1024
+                }
+            else:
+                # No data for this tenant
+                continue
+        else:
+            expected = None
+        try:
+            quotas = nova_api.quotas.get(uuid)
+        except:
+            continue
+
+        alloc['expected'] = expected
+        alloc['nova_quotas'] = quotas
+        alloc['deltas'] = deltas
+        updates.append(alloc)
+
+        # If the alloc and current quotas match, don't touch them
+        if (quotas.instances == alloc['instance_quota'] \
+            and quotas.ram == alloc['ram_quota'] * 1024 \
+            and quotas.cores == alloc['core_quota']):
+            alloc['update'] = 'no - quotas match'
+            continue
+        usage = _get_usage(nova_api, flavors, uuid)
+        alloc['nova_usage'] = usage
+        # If the usage is greater than the allocated quotas, don't touch them
+        if (usage['instances'] > alloc['instance_quota']
+            or usage['vcpus'] > alloc['core_quota']
+            or usage['ram'] > alloc['ram_quota'] * 1024):
+            alloc['update'] = 'no - over-quota usage'
+            continue
+        # If the difference between the nova quotas don't match the 
+        # expected quotas (i.e. alloc + deltas), don't touch them
+        if (expected != None
+            and (expected['instance_quota'] != quotas.instances
+                 or expected['ram_quota'] != quotas.ram
+                 or expected['core_quota'] != quotas.cores)):
+            alloc['update'] = 'no - deltas wrong'
+            continue
+        alloc['update'] = 'yes'
+
+    fields_to_report = [
+        ("Tenant ID", lambda x: x['tenant_uuid']),
+        ("Tenant Name", lambda x: x['tenant_name']),
+        ("Instances", lambda x: x['instance_quota']),
+        ("vCPU quota", lambda x: x['core_quota']),
+        ("Memory", lambda x: x['ram_quota'] * 1024),
+        ("Nova Instance quota", lambda x: x['nova_quotas'].instances),
+        ("Nova vCPU quota", lambda x: x['nova_quotas'].cores),
+        ("Nova Memory quota", lambda x: x['nova_quotas'].ram),
+        ("Nova Instance usage", 
+         lambda x: x['nova_usage']['instances'] if 'nova_usage' in x else ''),
+        ("Nova vCPU usage", 
+         lambda x: x['nova_usage']['vcpus'] if 'nova_usage' in x else ''),
+        ("Nova Memory usage", 
+         lambda x: x['nova_usage']['ram'] if 'nova_usage' in x else ''),
+        ("Instance delta", lambda x: x['deltas'][1] if 'deltas' in x else ''), 
+        ("vCPU delta", lambda x: x['deltas'][0] if 'deltas' in x else ''), 
+        ("Update", lambda x: x['update'])
+        ]
+    csv_output(map(lambda x: x[0], fields_to_report),
+               map(lambda alloc: map(
+                   lambda y: y[1](alloc),
+                   fields_to_report),
+                   updates),
+               filename=outfile)
+    
+
+        
+        
