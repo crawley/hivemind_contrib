@@ -3,6 +3,7 @@ import sys
 import csv
 import datetime
 import requests
+import traceback
 from fabric.api import task
 import collections
 from prettytable import PrettyTable
@@ -108,11 +109,10 @@ def allocation_managers(csv=False, filename=None):
 
 @task
 @verbose
-def get_instance_usage_csv(start_date=None, end_date=None, filename=None):
-    """Get instance usage statistics for all projects.
-Date strings should be ISO 8601 to minute precision
-without timezone information.
-
+def get_project_usage_csv(start_date=None, end_date=None, filename=None):
+    """Get accumulated instance usage statistics for all projects.
+    Date strings should be ISO 8601 to minute precision
+    without timezone information.
     """
     assert start_date and end_date
     start = datetime.datetime.strptime(start_date, "%Y-%m-%dT%H:%M")
@@ -135,10 +135,84 @@ without timezone information.
                 nova.usage.list(start, end, detailed=True))
     csv_output(headings, usage, filename=filename)
 
+@task
+@verbose
+def get_instance_usage_csv(start_date=None, end_date=None, filename=None):
+    """Get individual instance usage for all projects, including tenant and 
+    availability zones.  Date strings should be ISO 8601 to minute precision
+    without timezone information.
+    """
+    assert start_date and end_date
+    start = datetime.datetime.strptime(start_date, "%Y-%m-%dT%H:%M")
+    end = datetime.datetime.strptime(end_date, "%Y-%m-%dT%H:%M")
+    keystone = hm_keystone.client()
+    nova = hm_nova.client()
+
+    tenants = {x.id: x for x in keystone.tenants.list()}
+    usage = []
+    nos_tenants = 0
+    for u in nova.usage.list(start, end, detailed=True):
+        tenant_id = u.tenant_id
+        tenant_name = tenants[tenant_id].name if tenant_id in tenants else None
+        
+        # The Nova API doesn't allow "show" on deleted instances, but
+        # we can get the info using "list --deleted".  The problem is
+        # figuring out how to avoid retrieving irrelevant instances,
+        # and at the same time how to avoid too many requests.
+        #
+        # Attempt #1 - use the tenant_id and the instance's name to 
+        # focus queries.
+        deleted_instances_cache = {}
+        try:
+            for iu in u.server_usages:
+                name = iu['name']
+                instance_id = iu['instance_id']
+                instance = {'OS-EXT-AZ:availability_zone': 'unknown'}
+                if iu['state'] == 'terminated':
+                    if name in deleted_instances_cache:
+                        instances = deleted_instances_cache[name]
+                    else:
+                        try:
+                            instances = nova.servers.list(
+                                detailed=True,
+                                search_opts={'deleted': True,
+                                             'all_tenants': True,
+                                             'tenant_id': u.tenant_id,
+                                             'name' : name})
+                            deleted_instances_cache[name] = instances
+                        except:
+                            print "Can't get deleted '{0}' instances in {1}" \
+                                .format(name, u.tenant_id)
+                            traceback.print_exc(file=sys.stdout)
+                            deleted_instances_cache[name] = []
+                    try:
+                        instance = filter(
+                            lambda i: i.id == instance_id,
+                            instances)[0].to_dict()
+                    except:
+                        print 'Cannot find deleted instance {0} in {1}' \
+                            .format(instance_id, u.tenant_id)
+                else:
+                    try:
+                        instance = nova.servers.get(instance_id).to_dict()
+                    except:
+                        print 'Cannot find instance {0} in {1}' \
+                            .format(instance_id, u.tenant_id)
+                usage.append([tenant_id, tenant_name, instance_id, name,
+                              iu['state'], iu['flavor'], iu['hours'], 
+                              iu['vcpus'], iu['memory_mb'], iu['local_gb'], 
+                              instance['OS-EXT-AZ:availability_zone']])
+        except:
+            traceback.print_exc(file=sys.stdout)
+
+    headings = ["Tenant ID", "Tenant Name", "Instance id", "Instance name",
+                "Instance hours", "vCPUs", "Memory (MB)", "Disk (GB)", "AZ"]
+    csv_output(headings, usage, filename=filename)
+    
 
 class NectarApiSession(requests.Session):
     """Class to encapsulate the rest api endpoint with a requests session.
-
+    
     """
     def __init__(self, api_url=None, api_username=None,
                  api_password=None, *args, **kwargs):
@@ -161,7 +235,6 @@ class NectarApiSession(requests.Session):
         req = self._api_get('/api/quotas')
         req.raise_for_status()
         return req.json()
-
 
 @task
 @verbose
@@ -231,3 +304,5 @@ def get_local_allocations_information(filename=None, availability_zone=None):
         row.extend(map(lambda x: quotas[a_id][x], quota_fields))
         data_to_report.append(row)
     csv_output(fields_to_report, data_to_report, filename=filename)
+
+
