@@ -271,12 +271,12 @@ class NectarApiSession(requests.Session):
         return self.get("%s%s" % (self.api_url, rel_url), *args, **kwargs)
 
     def get_allocations(self):
-        req = self._api_get('/api/allocations')
+        req = self._api_get('/rest_api/allocations')
         req.raise_for_status()
         return req.json()
 
     def get_quotas(self):
-        req = self._api_get('/api/quotas')
+        req = self._api_get('/rest_api/quotas')
         req.raise_for_status()
         return req.json()
 
