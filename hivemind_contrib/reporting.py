@@ -127,10 +127,10 @@ def get_project_usage_csv(start_date=None, end_date=None,
     assert start_date and end_date
     start = datetime.datetime.strptime(start_date, "%Y-%m-%dT%H:%M")
     end = datetime.datetime.strptime(end_date, "%Y-%m-%dT%H:%M")
-    keystone = hm_keystone.client()
+    keystone = hm_keystone.client_session(version=3)
     nova = hm_nova.client()
 
-    tenants = {x.id: x for x in keystone.tenants.list()}
+    tenants = {x.id: x for x in keystone.projects.list()}
     headings = ["Tenant ID", "Tenant Name", "Instance count",
                 "Instance hours", "vCPU hours", "Memory Hours (MB)",
                 "Disk hours (GB)"]
@@ -157,10 +157,10 @@ def get_instance_usage_csv(start_date=None, end_date=None,
     assert start_date and end_date
     start = datetime.datetime.strptime(start_date, "%Y-%m-%dT%H:%M")
     end = datetime.datetime.strptime(end_date, "%Y-%m-%dT%H:%M")
-    keystone = hm_keystone.client()
+    keystone = hm_keystone.client_session(version=3)
     nova = hm_nova.client()
 
-    tenants = {x.id: x for x in keystone.tenants.list()}
+    tenants = {x.id: x for x in keystone.projects.list()}
     usage = []
     nos_tenants = 0
     for u in nova.usage.list(start, end, detailed=True):
@@ -182,7 +182,7 @@ def get_instance_usage_csv(start_date=None, end_date=None,
                 name = iu['name']
                 instance_id = iu['instance_id']
                 instance = None
-                if iu['state'] == 'terminated':
+                if iu['state'] == 'terminated' or iu['state'] == 'deleted':
                     instance = _get_deleted_instance(cache, nova, u.tenant_id,
                                                      name, instance_id)
                 else:
